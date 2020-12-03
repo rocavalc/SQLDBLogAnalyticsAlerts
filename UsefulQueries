@@ -1,0 +1,39 @@
+// Top waits
+AzureDiagnostics 
+| where Category=="DatabaseWaitStatistics" 
+| summarize sum(delta_wait_time_ms_d) by bin(start_utc_date_t, 15m), wait_type_s
+| render barchart
+
+// Storage consumption percentage > 90% for a specific database
+AzureMetrics
+| where _ResourceId contains "/SUBSCRIPTIONS/<SUBSCRIPTION>/RESOURCEGROUPS/<RESOURCEGROUP>/PROVIDERS/MICROSOFT.SQL/SERVERS/<SERVERNAME>/DATABASES/<DATABASENAME>"
+| where MetricName == "storage_percent" 
+| where Maximum > 90
+| project TimeGenerated , ResourceId , MetricName , Maximum
+
+// Storage consumption percentage > 85% for all databases
+AzureMetrics
+| where _ResourceId contains "/DATABASES/"
+| where MetricName == "storage_percent" 
+| where Maximum > 85
+| project TimeGenerated , ResourceId , MetricName , Maximum
+
+// Deadlocks > 1
+AzureMetrics
+| where _ResourceId contains "/SUBSCRIPTIONS/<SUBSCRIPTION>/RESOURCEGROUPS/<RESOURCEGROUP>/PROVIDERS/MICROSOFT.SQL/SERVERS/<SERVERNAME>/DATABASES/<DATABASENAME>"
+| where MetricName == "deadlock" 
+| project TimeGenerated , ResourceId , MetricName , Maximum
+
+// DTU consumption > 90%
+AzureMetrics
+| where _ResourceId contains "/SUBSCRIPTIONS/<SUBSCRIPTION>/RESOURCEGROUPS/<RESOURCEGROUP>/PROVIDERS/MICROSOFT.SQL/SERVERS/<SERVERNAME>/DATABASES/<DATABASENAME>"
+| where MetricName == "dtu_consumption_percent" 
+| where Maximum > 90
+| project TimeGenerated , ResourceId , MetricName , Maximum 
+
+// Blocking, waits and other SQL Insights metrics
+AzureDiagnostics
+| where LogicalServerName_s contains "<servername>" 
+| where databaseName_s contains "<databasename>" 
+| where impact_s contains "ExcessiveWaitingSeconds" 
+| project TimeGenerated , LogicalServerName_s , databaseName_s , impact_s , detections_s , rootCauseAnalysis_s, status_s 
