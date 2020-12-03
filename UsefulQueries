@@ -4,6 +4,35 @@ AzureDiagnostics
 | summarize sum(delta_wait_time_ms_d) by bin(start_utc_date_t, 15m), wait_type_s
 | render barchart
 
+// Azure SQL DB waits chart
+AzureDiagnostics
+| where Category == "QueryStoreWaitStatistics"
+| project Resource = extract(".+/DATABASES/(.+)", 1, ResourceId).tolower(), TimeGenerated, total_query_wait_time_ms_d, wait_category_s
+| summarize total_wait_time = sum(total_query_wait_time_ms_d) / 1000
+    by wait_category_s, bin(TimeGenerated, 30m)
+| top 1000 by total_wait_time desc
+| evaluate pivot(wait_category_s, sum(total_wait_time))
+| render columnchart 
+
+// SQL Insights High CPU
+let alert_run_interval = 1h;
+let insights_string = "hitting its CPU limits";
+AzureDiagnostics
+| where Category == "SQLInsights" and status_s == "Active"
+| where TimeGenerated > ago(alert_run_interval)
+| where rootCauseAnalysis_s contains insights_string
+| distinct ResourceId
+
+// Azure SQL Database storage averaging above 80% in the last 1 hr 
+let time_range = 1h;
+let storage_threshold = 10;
+AzureMetrics
+| where ResourceId contains "/DATABASES/"
+| where MetricName == "storage_percent"
+| summarize max_storage = max(Average) by ResourceId, bin(TimeGenerated, time_range)
+| where max_storage > storage_threshold
+| distinct ResourceId
+
 // Storage consumption percentage > 90% for a specific database
 AzureMetrics
 | where _ResourceId contains "/SUBSCRIPTIONS/<SUBSCRIPTION>/RESOURCEGROUPS/<RESOURCEGROUP>/PROVIDERS/MICROSOFT.SQL/SERVERS/<SERVERNAME>/DATABASES/<DATABASENAME>"
@@ -18,11 +47,82 @@ AzureMetrics
 | where Maximum > 85
 | project TimeGenerated , ResourceId , MetricName , Maximum
 
+// Find all auditing messages
+search *
+| where Category == 'SQLSecurityAuditEvents'
+| where ResourceId contains  '/DATABASES/MASTER'
+| project event_time_t ,statement_s, AlertName, client_ip_s
+| order by event_time_t desc
+| take 100
+
+// Find auditing messages for this specific database
+search *
+| where Category == 'SQLSecurityAuditEvents'
+| where ResourceId contains  '/DATABASES/MyDBName'
+| project event_time_t ,statement_s, AlertName , client_ip_s
+| order by event_time_t desc
+| take 100
+
+// Query Audit logs 
+search *
+| where Category == 'SQLSecurityAuditEvents'
+| where ResourceId contains '/DATABASES/'
+| where statement_s contains 'select' or statement_s contains 'insert' or statement_s contains 'exec'
+| project event_time_t ,statement_s , succeeded_s,affected_rows_d,server_principal_name_s ,client_ip_s,application_name_s,additional_information_s
+| order by event_time_t desc
+| take 100
+
+// Managed Instance CPU consumption over time
+AzureDiagnostics
+| where ResourceType == "MANAGEDINSTANCES"
+| summarize max_cpu = max(todouble(avg_cpu_percent_s)) by LogicalServerName_s, bin(TimeGenerated, 30m)
+| render timechart
+
+// Workload continously hitting CPU limits 
+// Intelligent insights report detecting the workload behavor as continously hitting CPU limits. Please note that SQLInsights log needs to be enabled for each database monitored. 
+let alert_run_interval = 24h;
+let insights_string = "hitting its CPU limits";
+AzureDiagnostics
+| where Category == "SQLInsights" and status_s == "Active"
+| where TimeGenerated > ago(alert_run_interval)
+| where rootCauseAnalysis_s contains insights_string
+| distinct _ResourceId
+
+// Display all active intelligent insights 
+// Display all active performance issues detected by intelligent insights. Please note that SQLInsights log needs to be enabled for each database monitored. 
+AzureDiagnostics
+| where Category == "SQLInsights" and status_s == "Active"
+| distinct rootCauseAnalysis_s
+
+// CPU utilization treshold above 95% on managed instances 
+// Display all managed instances with CPU treshold being over 95% of treshold. 
+let cpu_percentage_threshold = 55;
+let time_threshold = ago(72h);
+AzureDiagnostics
+| where Category == "ResourceUsageStats" and TimeGenerated > time_threshold
+| summarize avg_cpu = max(todouble(avg_cpu_percent_s)) by _ResourceId
+| where avg_cpu > cpu_percentage_threshold
+
 // Deadlocks > 1
 AzureMetrics
 | where _ResourceId contains "/SUBSCRIPTIONS/<SUBSCRIPTION>/RESOURCEGROUPS/<RESOURCEGROUP>/PROVIDERS/MICROSOFT.SQL/SERVERS/<SERVERNAME>/DATABASES/<DATABASENAME>"
 | where MetricName == "deadlock" 
 | project TimeGenerated , ResourceId , MetricName , Maximum
+
+// Overall SQL MI CPU Consumption in 5 minutes intervals
+AzureDiagnostics
+| where ResourceType == "MANAGEDINSTANCES" 
+| where ResourceId contains "MANAGEDINSTANCES"
+| summarize cpu = max(todouble(avg_cpu_percent_s)) by bin(TimeGenerated, 5m) 
+| render timechart
+
+// Azure SQL DB DTU Consumption
+AzureMetrics
+| where _ResourceId contains "MyDBName"
+| where MetricName == "dtu_consumption_percent" 
+| where Maximum > 05
+| project TimeGenerated , ResourceId , MetricName , Maximum
+| render timechart 
 
 // DTU consumption > 90%
 AzureMetrics
@@ -37,3 +137,66 @@ AzureDiagnostics
 | where databaseName_s contains "<databasename>" 
 | where impact_s contains "ExcessiveWaitingSeconds" 
 | project TimeGenerated , LogicalServerName_s , databaseName_s , impact_s , detections_s , rootCauseAnalysis_s, status_s 
+
+// List all the NETWORKIO waits recorded in the selected period with a total query wait time greater than "maxwait", agregated by the sum of waits
+let maxwait = 10;
+let StartTime = datetime('09/05/2020 22:00'); 
+let EndTime = datetime('09/10/2020 22:20');  
+AzureDiagnostics
+| where Category=="QueryStoreWaitStatistics"
+| where ResourceType == "MANAGEDINSTANCES/DATABASES"
+| where ResourceId contains "/DATABASES/"
+//| where wait_category_s == "NETWORKIO" 
+| where TimeGenerated between(StartTime..EndTime)
+| where total_query_wait_time_ms_d > maxwait
+| summarize sum(total_query_wait_time_ms_d) by bin(TimeGenerated, 1h)  
+
+// Query to monitor errors on my managed instance database
+AzureDiagnostics
+| where ResourceId contains "ADVENTUREWORKS"
+| where (Category == "Errors" and error_number_d !in (9104, 22803)) or (Category == "Blocks") or (Category == "Timeouts" and query_hash_s !in ("", "0", "-1")) or (Category == "Deadlocks")
+| project Message, database_name_s, error_number_d, Severity
+//| summarize count() by Category, bin(TimeGenerated, 30m)
+//| render barchart
+
+// Managed Instance CPU consumption in 5 minutes intervals
+AzureDiagnostics
+| where ResourceType == "MANAGEDINSTANCES"
+| summarize max_cpu = max(todouble(avg_cpu_percent_s)) by LogicalServerName_s, bin(TimeGenerated, 5m)
+| render timechart
+
+// Managed Instance Max IO reads in 5 minutes intervals
+AzureDiagnostics
+| where ResourceType == "MANAGEDINSTANCES"
+| summarize max_io = max(todouble(io_bytes_read_s)) by LogicalServerName_s, bin(TimeGenerated, 5m)
+| render timechart
+
+// Managed Instance Max IO writes in 5 minutes intervals
+AzureDiagnostics
+| where ResourceType == "MANAGEDINSTANCES"
+| summarize max_writes = max(todouble(io_bytes_written_s)) by LogicalServerName_s, bin(TimeGenerated, 1m)
+| render timechart
+
+// List available fields and runtime statistics from the query store
+AzureDiagnostics
+| where Category=="QueryStoreRuntimeStatistics"
+| limit 10
+
+// display query statistics
+let x = (10);
+let StartTime = datetime('11/20/2020 23:50');
+let EndTime = datetime('12/27/2022 23:30'); 
+AzureDiagnostics
+| where Category=="QueryStoreRuntimeStatistics"
+| where ResourceType == "MANAGEDINSTANCES/DATABASES"
+//| where ResourceId contains"adventureworksPTO"
+| where TimeGenerated between(StartTime..EndTime)
+| extend avgcpu = cpu_time_d / count_executions_d
+| distinct query_id_d, TimeGenerated , Category , ResourceType , query_hash_s, query_plan_hash_s, plan_id_d
+, cpu_time_d , avgcpu, count_executions_d, duration_d 
+//| distinct query_id_d, Category
+| order by avgcpu desc 
+| top x by avgcpu desc nulls last //top 10 by duration
+//| summarize any(query_id_d), any(avgcpu) by bin(TimeGenerated, 15s)
+| summarize max(query_id_d), avgduration = avg(duration_d) by bin(TimeGenerated, 1d)
+| render barchart  
