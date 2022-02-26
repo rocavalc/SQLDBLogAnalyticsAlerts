@@ -1,3 +1,5 @@
+// Azure SQL Analytics KQL queries
+
 // Top waits
 AzureDiagnostics 
 | where Category=="DatabaseWaitStatistics" 
